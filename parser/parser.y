@@ -3819,6 +3819,11 @@ JoinTable:
          * }
          *
 	 */
+|
+    TableRef CrossOpt TableRef "ON" Expression
+    {
+        on := &ast.Onconde
+    }
 
 JoinType:
 	"LEFT"

@@ -30,10 +30,20 @@ import (
 	"github.com/pingcap/tidb/util/rowcodec"
 )
 
+/*
+	Key： tablePrefix_tableID_recordPrefixSep_rowID （PrimaryKey）
+	Value: [col1, col2, col3, col4] （PrimaryValue）
+
+    Key: tablePrefix_tableID_indexPrefixSep_indexID_indexColumnsValue （IndexKey）
+    Value: rowID (IndexValue)
+
+	Key: tablePrefix_tableID_indexPrefixSep_indexID_ColumnsValue_rowID (Non-uniqueIndexKey)
+	Value：null (Non-uniqueIndexValue)
+*/
 var (
-	tablePrefix     = []byte{'t'}
-	recordPrefixSep = []byte("_r")
-	indexPrefixSep  = []byte("_i")
+	tablePrefix     = []byte{'t'}  // 表名的前缀
+	recordPrefixSep = []byte("_r") // 记录的前缀
+	indexPrefixSep  = []byte("_i") // 索引的前缀
 )
 
 const (
@@ -41,19 +51,21 @@ const (
 	prefixLen = 1 + idLen /*tableID*/ + 2
 	// RecordRowKeyLen is public for calculating average row size.
 	RecordRowKeyLen       = prefixLen + idLen /*handle*/
-	tablePrefixLength     = 1
-	recordPrefixSepLength = 2
+	tablePrefixLength     = 1                 // 表前缀的长度
+	recordPrefixSepLength = 2                 // 记录前缀的长度
 )
 
 // TableSplitKeyLen is the length of key 't{table_id}' which is used for table split.
 const TableSplitKeyLen = 1 + idLen
 
 // TablePrefix returns table's prefix 't'.
+// 返回表前缀
 func TablePrefix() []byte {
 	return tablePrefix
 }
 
 // appendTableRecordPrefix appends table record prefix  "t[tableID]_r".
+// 添加tablePrefix、tableId、recordPrefixSep
 func appendTableRecordPrefix(buf []byte, tableID int64) []byte {
 	buf = append(buf, tablePrefix...)
 	buf = codec.EncodeInt(buf, tableID)
@@ -62,6 +74,7 @@ func appendTableRecordPrefix(buf []byte, tableID int64) []byte {
 }
 
 // EncodeRowKeyWithHandle encodes the table id, row handle into a kv.Key
+// 编码tablePrefix、tableId、recordPrefixSep、rowId（key）
 func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 	buf := make([]byte, 0, RecordRowKeyLen)
 	buf = appendTableRecordPrefix(buf, tableID)
@@ -70,6 +83,7 @@ func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 }
 
 // DecodeRecordKey decodes the key and gets the tableID, handle.
+// 解码key获得tableId，handle
 func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
 	/* Project 1-2: your code here
 	 * DecodeRecordKey decodes the key and gets the tableID, handle.
@@ -98,10 +112,65 @@ func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
 	 *   5. understanding the coding rules is a prerequisite for implementing this function,
 	 *      you can learn it in the projection 1-2 course documentation.
 	 */
-	return
+
+	/*
+		项目1-2:你的代码在这里
+		DecodeRecordKey解码键并获取tableID，句柄。
+		解码实际上是编码的反向，所以你可以参考EncodeRowKeyWithHandle。
+
+		参数
+		key:需要解码的密钥。它可能无效。
+
+		返回值
+		tableID:解码后的值。
+		handle:解码后的值。
+		err:解码时出错，否则为nil。
+
+		DecodeRecordKey可能需要遵循以下步骤:
+		1.检查密钥是否有效。
+		2.获取表前缀并解码。
+		3.获取记录前缀并解码。
+		4.创建handle。
+		5.返回解码后的值。
+
+		一些提示:
+		1.你可能需要编解码器。DecodeInt将字符串解码为int
+		2.const ' prefixLen '， ' tablePrefixLength '和' recordPrefixSepLength '是有用的。
+		3.errInvalidRecordKey。GenWithStack是一个有用的函数，用于生成无效的记录键错误。
+		4.如果发生错误，返回0作为tableID, nil作为句柄和错误。
+		5.理解编码规则是实现此功能的先决条件，你可以在投影1-2课程文档中学习。
+	*/
+
+	// 1.检查密钥是否有效
+	if key == nil || len(key) != 19 {
+		return 0, 0, errInvalidRecordKey
+	}
+
+	// 2.获取表前缀并解码
+	if !key.HasPrefix(tablePrefix) {
+		return 0, 0, errInvalidRecordKey
+	}
+	key = key[tablePrefixLength:]
+	key, tableID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// 3.获取记录前缀并解码。
+	if !key.HasPrefix(recordPrefixSep) {
+		return 0, 0, errInvalidRecordKey
+	}
+	key = key[recordPrefixSepLength:]
+	key, handle, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return tableID, handle, nil
 }
 
 // appendTableIndexPrefix appends table index prefix  "t[tableID]_i".
+// 编码tablePrefix、tableID、indexPrefixSep
 func appendTableIndexPrefix(buf []byte, tableID int64) []byte {
 	buf = append(buf, tablePrefix...)
 	buf = codec.EncodeInt(buf, tableID)
@@ -110,6 +179,7 @@ func appendTableIndexPrefix(buf []byte, tableID int64) []byte {
 }
 
 // EncodeIndexSeekKey encodes an index value to kv.Key.
+// 编码tablePrefix、tableID、indexPrefixSep、indexID、indexColumnsValue
 func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key {
 	key := make([]byte, 0, prefixLen+idLen+len(encodedValue))
 	key = appendTableIndexPrefix(key, tableID)
@@ -148,6 +218,35 @@ func DecodeIndexKeyPrefix(key kv.Key) (tableID int64, indexID int64, indexValues
 	 *   5. understanding the coding rules is a prerequisite for implementing this function,
 	 *      you can learn it in the projection 1-2 course documentation.
 	 */
+
+	// 1.检查密钥是否有效
+	if key == nil || len(key) <= 19 {
+		return 0, 0, nil, errInvalidRecordKey
+	}
+
+	// 2.解码tableID
+	if !key.HasPrefix(tablePrefix) {
+		return 0, 0, nil, errInvalidRecordKey
+	}
+	key = key[tablePrefixLength:]
+	key, tableID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	// 3.解码indexID
+	if !key.HasPrefix(indexPrefixSep) {
+		return 0, 0, nil, errInvalidRecordKey
+	}
+	key = key[recordPrefixSepLength:]
+	key, indexID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	// 4.解码indexValues
+	indexValues = key
+
 	return tableID, indexID, indexValues, nil
 }
 
