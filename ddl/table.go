@@ -373,9 +373,40 @@ func updateVersionAndTableInfoWithCheck(t *meta.Meta, job *model.Job, tblInfo *m
  *       - Consider when you need to update tableInfo.UpdateTS by t.
  *       - `t.UpdateTable` and `updateSchemaVersion` will be used here.
  */
+/* updateVersionAndTableInfo更新模式版本和表信息。
+ *  参数:
+ *  t *meta.Meta:处理事务中的元信息;
+ *  job *model.Job:一个ddl作业，这里是一个删除列作业;
+ *  tblInfo *model.TableInfo:表信息
+ *  shouldUpdateVer bool:是否更新版本
+ *  返回值:
+ *  ver:当前版本;
+ *  error:错误信息;
+ *  updateVersionAndTableInfo可能需要遵循以下步骤:
+ *  1、更新schema版本;
+ *  2、更新表信息;
+ *  一些可能有用的提示:
+ *  -考虑何时需要根据t来更新tableInfo.UpdateTS。
+ *  -'t.UpdateTable'和'updateSchemaVersion'将在这里使用。
+ */
 func updateVersionAndTableInfo(t *meta.Meta, job *model.Job, tblInfo *model.TableInfo, shouldUpdateVer bool) (
 	ver int64, err error) {
 	// TODO complete this function.
+	// 1.更新schema版本
+	if shouldUpdateVer {
+		ver, err = updateSchemaVersion(t, job)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+	}
+
+	// 2.当table的状态为public时，就更新tableInfo.UpdateTS
+	if tblInfo.State == model.StatePublic {
+		tblInfo.UpdateTS = job.StartTS
+	}
+
+	// 3.更新表信息
+	err = t.UpdateTable(job.SchemaID, tblInfo)
 
 	return ver, errors.Trace(err)
 }

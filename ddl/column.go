@@ -154,8 +154,31 @@ func checkAddColumn(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.Colu
  *       - Pay attention to the state of schema and columnInfo.
  *       - Remember use `FinishTableJob` to finish the job.
  */
+
+/* onAddColumn处理添加列作业
+ * 参数:
+ * d *ddlCtx: ddl的上下文，但在这里不会使用它;
+ * t *meta.Meta:处理事务中的元信息;
+ * job *model.Job:一个ddl作业，这里是一个添加列作业;
+ * 返回值:
+ * ver:当前版本;
+ * error:错误信息，但err会被其他工具跟踪，不需要返回;
+ * onAddColumn可能需要遵循以下步骤:
+ * 1、判断作业是否回滚以调用'onDropColumn';
+ * 2、从作业中获取表和修改的列信息;
+ * 3、如果列信息为空，创建一个列来添加;
+ * 4、确定工作的阶段。(阶段顺序:none -> delete only -> write only -> reorg -> public);
+ * 5、处理好本阶段的工作，进入下一阶段;
+ * 6、更新信息并返回版本。
+ * 一些可能有用的提示:
+ * -您需要填写每个个案的编号。
+ * -你需要找到合适的地方，把函数' adjustColumnInfoInAddColumn '。
+ * -注意schema和columnInfo的状态。
+ * -记住使用' FinishTableJob '来完成任务。
+ */
 func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {
 	// Handle the rolling back job.
+	// 1.判断作业是否为回滚，如果是则需要调用onDropColumn操作
 	if job.IsRollingback() {
 		ver, err = onDropColumn(t, job)
 		if err != nil {
@@ -170,10 +193,13 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 		}
 	})
 
+	// 2.从作业中获取表和修改的列信息
 	tblInfo, columnInfo, col, offset, err := checkAddColumn(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
+
+	// 3.如果列信息为空，创建一个列来添加
 	if columnInfo == nil {
 		columnInfo, offset, err = createColumnInfo(tblInfo, col)
 		if err != nil {
@@ -196,16 +222,33 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 	switch columnInfo.State {
 	case model.StateNone:
 		// To be filled
+		// none -> delete-only
+		job.SchemaState = model.StateDeleteOnly
+		columnInfo.State = model.StateDeleteOnly
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != columnInfo.State)
 	case model.StateDeleteOnly:
 		// To be filled
+		// delete-only -> write-only
+		job.SchemaState = model.StateWriteOnly
+		columnInfo.State = model.StateWriteOnly
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
 	case model.StateWriteOnly:
 		// To be filled
+		// write-only -> reorgnization
+		job.SchemaState = model.StateWriteReorganization
+		columnInfo.State = model.StateWriteReorganization
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
 	case model.StateWriteReorganization:
 		// To be filled
+		// reorgnization -> public
+		adjustColumnInfoInAddColumn(tblInfo, offset)
+		columnInfo.State = model.StatePublic
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+
+		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
 	default:
 		err = ErrInvalidDDLState.GenWithStackByArgs("column", columnInfo.State)
 	}
@@ -234,28 +277,85 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
  *       - Remember use `FinishTableJob` to finish the job.
  *       - Don't forget to do something, if this is a rolling back add column job.
  */
+/* onDropColumn处理删除列作业
+ * 参数:
+ * t *meta.Meta:处理事务中的元信息;
+ * job *model.Job:一个ddl作业，这里是一个删除列作业;
+ * 返回值:
+ * ver:当前版本;
+ * error:错误信息，但err会被其他工具跟踪，不需要返回;
+ * onDropColumn可能需要遵循以下步骤:
+ * 1、从作业中获取表和修改的列信息;
+ * 2、确定工作的阶段。(阶段顺序:public -> write only -> delete only -> reorg);
+ * 3、处理好本阶段的工作，进入下一阶段;
+ * 4、更新信息并返回版本。
+ * 一些可能有用的提示:
+ * -您需要填写每个case。
+ * -你需要找到合适的地方，把函数'adjustColumnInfoInDropColumn'。
+ * -你还需要对默认值采取一个例外的情况。
+ * -考虑非空属性和默认值将如何影响“删除列”操作。
+ * -你可以通过'generateOriginDefaultValue'获得一个默认值。
+ * -记住使用'FinishTableJob'来完成任务。
+ * -不要忘记做一些事情，如果这是一个回滚添加列的作业。
+ */
 func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	// 1.获取表和修改列的信息
 	tblInfo, colInfo, err := checkDropColumn(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
+	var colName model.CIStr
+	err = job.DecodeArgs(&colName)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	// 2.确定工作的阶段（public -> write only -> delete only -> reorg）
 	originalState := colInfo.State
 
 	// TODO fill the codes of the each case.
 	switch colInfo.State {
 	case model.StatePublic:
 		// To be filled
+		// public -> write only
+		job.SchemaState = model.StateWriteOnly
+		colInfo.State = model.StateWriteOnly
+		// Set this column's offset to the last and reset all following columns' offsets.
+		adjustColumnInfoInDropColumn(tblInfo, colInfo.Offset)
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateWriteOnly:
 		// To be filled
+		// write only -> delete only
+		job.SchemaState = model.StateDeleteOnly
+		colInfo.State = model.StateDeleteOnly
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateDeleteOnly:
 		// To be filled
+		// delete only -> reorganization
+		job.SchemaState = model.StateDeleteReorganization
+		colInfo.State = model.StateDeleteReorganization
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateDeleteReorganization:
 		// To be filled
+		// reorganization -> absent
+		// All reorganization jobs are done, drop this column.
+		newColumns := make([]*model.ColumnInfo, 0, len(tblInfo.Columns))
+		for _, col := range tblInfo.Columns {
+			if col.Name.L != colName.L {
+				newColumns = append(newColumns, col)
+			}
+		}
+		tblInfo.Columns = newColumns
+		colInfo.State = model.StateNone
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+
+		// Finish this job.
+		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
 	default:
 		err = errInvalidDDLJob.GenWithStackByArgs("table", tblInfo.State)
 	}
