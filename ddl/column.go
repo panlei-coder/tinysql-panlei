@@ -33,13 +33,18 @@ import (
 // 1. The added column was append at the end of tblInfo.Columns, due to ddl state was not public then.
 //    It should be moved to the correct position when the ddl state to be changed to public.
 // 2. The offset of column should also to be set to the right value.
+// adjustColumnInfoInAddColumn用于设置添加列时列info的正确位置。
+// 1、添加的列被附加在tblInfo的末尾。列，由于ddl状态是不公开的。
+// 当ddl的状态变为public时，它应该被移动到正确的位置。
+// 2、列的偏移量也应该设置为正确的值。
 func adjustColumnInfoInAddColumn(tblInfo *model.TableInfo, offset int) {
 	oldCols := tblInfo.Columns
 	newCols := make([]*model.ColumnInfo, 0, len(oldCols))
 	newCols = append(newCols, oldCols[:offset]...)
-	newCols = append(newCols, oldCols[len(oldCols)-1])
+	newCols = append(newCols, oldCols[len(oldCols)-1]) // 将末尾待添加的列移动到指定的位置上
 	newCols = append(newCols, oldCols[offset:len(oldCols)-1]...)
 	// Adjust column offset.
+	// 重新设置偏移量
 	offsetChanged := make(map[int]int)
 	for i := offset + 1; i < len(newCols); i++ {
 		offsetChanged[newCols[i].Offset] = i
@@ -62,6 +67,9 @@ func adjustColumnInfoInAddColumn(tblInfo *model.TableInfo, offset int) {
 // adjustColumnInfoInDropColumn is used to set the correct position of column info when dropping column.
 // 1. The offset of column should to be set to the last of the columns.
 // 2. The dropped column is moved to the end of tblInfo.Columns, due to it was not public any more.
+// adjustColumnInfoInDropColumn用于设置删除列时列信息的正确位置。
+// 1.列的偏移量应设置为最后一列。
+// 2.被删除的列被移动到tblInfo的末尾。列，因为它不再是公开的。
 func adjustColumnInfoInDropColumn(tblInfo *model.TableInfo, offset int) {
 	oldCols := tblInfo.Columns
 	// Adjust column offset.
@@ -178,7 +186,7 @@ func checkAddColumn(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.Colu
  */
 func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {
 	// Handle the rolling back job.
-	// 1.判断作业是否为回滚，如果是则需要调用onDropColumn操作
+	// 1.判断作业是否为回滚，如果是则需要调用onDropColumn，进行删除操作
 	if job.IsRollingback() {
 		ver, err = onDropColumn(t, job)
 		if err != nil {
@@ -194,12 +202,14 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 	})
 
 	// 2.从作业中获取表和修改的列信息
+	//（tblInfo为修改之前的列信息，col为待添加的列，col是从job.RawArgs解析出来的）
+	// 后续将col添加到表之后，columnInfo就是指向这个被添加的列
 	tblInfo, columnInfo, col, offset, err := checkAddColumn(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
-	// 3.如果列信息为空，创建一个列来添加
+	// 3.如果待添加的列不存在于之前的表中，则将这个待添加的列添加到tblInfo的末尾
 	if columnInfo == nil {
 		columnInfo, offset, err = createColumnInfo(tblInfo, col)
 		if err != nil {
@@ -241,8 +251,11 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 	case model.StateWriteReorganization:
 		// To be filled
 		// reorgnization -> public
-		adjustColumnInfoInAddColumn(tblInfo, offset)
+		adjustColumnInfoInAddColumn(tblInfo, offset) // 将列的位置挪动到指定的offset位置
+
+		// job.SchemaState = model.StatePublic
 		columnInfo.State = model.StatePublic
+
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -299,12 +312,13 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
  * -不要忘记做一些事情，如果这是一个回滚添加列的作业。
  */
 func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
-	// 1.获取表和修改列的信息
+	// 1.获取表和修改列的信息（colInfo是指向待删除的列）
 	tblInfo, colInfo, err := checkDropColumn(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
+	// 2.解析出需要删除的列的列名
 	var colName model.CIStr
 	err = job.DecodeArgs(&colName)
 	if err != nil {
@@ -312,7 +326,7 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		return ver, errors.Trace(err)
 	}
 
-	// 2.确定工作的阶段（public -> write only -> delete only -> reorg）
+	// 3.确定工作的阶段（public -> write only -> delete only -> reorg）
 	originalState := colInfo.State
 
 	// TODO fill the codes of the each case.
@@ -323,6 +337,7 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		job.SchemaState = model.StateWriteOnly
 		colInfo.State = model.StateWriteOnly
 		// Set this column's offset to the last and reset all following columns' offsets.
+		// 将这一列的偏移量设置为最后一个，并重置后面所有列的偏移量，没有做删除操作
 		adjustColumnInfoInDropColumn(tblInfo, colInfo.Offset)
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateWriteOnly:
@@ -341,6 +356,7 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		// To be filled
 		// reorganization -> absent
 		// All reorganization jobs are done, drop this column.
+		// 正式将某个列删除掉（可以参考checkAddColumn()函数部分的代码）
 		newColumns := make([]*model.ColumnInfo, 0, len(tblInfo.Columns))
 		for _, col := range tblInfo.Columns {
 			if col.Name.L != colName.L {
@@ -348,7 +364,10 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 			}
 		}
 		tblInfo.Columns = newColumns
+
+		// job.SchemaState = model.StateNone
 		colInfo.State = model.StateNone
+
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
 		if err != nil {
 			return ver, errors.Trace(err)

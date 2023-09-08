@@ -36,6 +36,7 @@ func onCreateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 		}
 	})
 
+	// 1.先从job中获取待创建的表信息
 	schemaID := job.SchemaID
 	tbInfo := &model.TableInfo{}
 	if err := job.DecodeArgs(tbInfo); err != nil {
@@ -44,6 +45,7 @@ func onCreateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 		return ver, errors.Trace(err)
 	}
 
+	// 2.根据获取的待创建的表信息，检查该表是否存在
 	tbInfo.State = model.StateNone
 	err := checkTableNotExists(d, t, schemaID, tbInfo.Name.L)
 	if err != nil {
@@ -53,6 +55,7 @@ func onCreateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 		return ver, errors.Trace(err)
 	}
 
+	// 2.如果不存在，则更新表的信息
 	ver, err = updateSchemaVersion(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
@@ -62,12 +65,13 @@ func onCreateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 	case model.StateNone:
 		// none -> public
 		tbInfo.State = model.StatePublic
-		tbInfo.UpdateTS = t.StartTS
+		tbInfo.UpdateTS = t.StartTS // 当表的状态为public时候，更新UpdateTS
 		err = createTableOrViewWithCheck(t, job, schemaID, tbInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
 		// Finish this job.
+		// 创建表的任务完成
 		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
 		return ver, nil
 	default:
