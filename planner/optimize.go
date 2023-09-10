@@ -29,7 +29,7 @@ import (
 func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is infoschema.InfoSchema) (plannercore.Plan, types.NameSlice, error) {
 	sctx.PrepareTxnFuture(ctx)
 
-	// build logical plan
+	// build logical plan（将一个node生成一个计划）
 	sctx.GetSessionVars().PlanID = 0
 	sctx.GetSessionVars().PlanColumnID = 0
 	builder := plannercore.NewPlanBuilder(sctx, is)
@@ -41,12 +41,14 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 	names := p.OutputNames()
 
 	// Handle the non-logical plan statement.
+	// 生成逻辑计划
 	logic, isLogicalPlan := p.(plannercore.LogicalPlan)
 	if !isLogicalPlan {
 		return p, names, nil
 	}
 
 	// Handle the logical plan statement, use cascades planner if enabled.
+	// 对逻辑计划进行优化
 	if sctx.GetSessionVars().EnableCascadesPlanner {
 		finalPlan, err := cascades.DefaultOptimizer.FindBestPlan(sctx, logic)
 		return finalPlan, names, err

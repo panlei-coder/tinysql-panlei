@@ -141,6 +141,7 @@ func checkAddColumn(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.Colu
 	return tblInfo, columnInfo, col, offset, nil
 }
 
+// 参考链接：https://github.com/ngaut/builddatabase/blob/master/f1/schema-change-implement.md
 /* onAddColumn handle add column job
  *  parameters:
  *      d *ddlCtx:      context of the ddl, but you won't use it here;
@@ -162,7 +163,6 @@ func checkAddColumn(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.Colu
  *       - Pay attention to the state of schema and columnInfo.
  *       - Remember use `FinishTableJob` to finish the job.
  */
-
 /* onAddColumn处理添加列作业
  * 参数:
  * d *ddlCtx: ddl的上下文，但在这里不会使用它;
@@ -253,7 +253,7 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 		// reorgnization -> public
 		adjustColumnInfoInAddColumn(tblInfo, offset) // 将列的位置挪动到指定的offset位置
 
-		// job.SchemaState = model.StatePublic
+		// job.SchemaState = model.StatePublic // 这里是finish job，所以不需要更改job.SchemaState
 		columnInfo.State = model.StatePublic
 
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
@@ -374,7 +374,11 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		}
 
 		// Finish this job.
-		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
+		if job.IsRollingback() {
+			job.FinishTableJob(model.JobStateRollbackDone, model.StateNone, ver, tblInfo)
+		} else {
+			job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
+		}
 	default:
 		err = errInvalidDDLJob.GenWithStackByArgs("table", tblInfo.State)
 	}

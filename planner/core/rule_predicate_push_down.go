@@ -365,7 +365,33 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 // below the current aggregation.
 // Hints:
 //   1. predicates need to be discussed in two types: expression.Constant and expression.ScalarFunction
+// PredicatePushDown实现LogicalPlan PredicatePushDown接口。
+// TODO:项目4-1你的代码在这里。
+// 这里需要跨聚合推送谓词。
+// 一个简单的例子是，' select * from (select count(*) from t group by b) tmp_t where b > 1 '与
+// ' select * from (select count(*) from t where b > 1 group by b) tmp_t。
+// 参数:
+// 谓词:一个表达式切片，需要尽可能地向下推。
+// 返回值:
+// ret:不能被压入的表达式。
+// retPlan:一个表示新根的计划，因为如果having子句存在，它可能会改变根
+// 在这个函数中，你需要遍历列表'谓词'，并考虑其中的每个函数是否可以下推到低于当前聚合中。
+// 提示:
+// 1、需要以两种类型讨论谓词:expression.Constant和expression.ScalarFunction
 func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expression) (ret []expression.Expression, retPlan LogicalPlan) {
+	canBePushed := make([]expression.Expression, 0, len(predicates))
+	canNotBePushed := make([]expression.Expression, 0, len(predicates))
+	for _, expr := range la.GroupByItems {
+		if expression.HasAssignSetVarFunc(expr) {
+			_, child := la.baseLogicalPlan.PredicatePushDown(nil)
+			return predicates, child
+		}
+	}
+
+	for _, cond := range predicates {
+		new
+	}
+
 	return predicates, la
 }
 
