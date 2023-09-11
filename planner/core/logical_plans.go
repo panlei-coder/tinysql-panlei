@@ -131,13 +131,14 @@ type LogicalProjection struct {
 type LogicalAggregation struct {
 	logicalSchemaProducer
 
-	AggFuncs     []*aggregation.AggFuncDesc
-	GroupByItems []expression.Expression
+	AggFuncs     []*aggregation.AggFuncDesc // 聚集函数的描述符集合
+	GroupByItems []expression.Expression    // 表达式集合
 	// groupByCols stores the columns that are group-by items.
-	groupByCols []*expression.Column
+	groupByCols []*expression.Column // groupby的列集合
 
-	possibleProperties [][]*expression.Column
-	inputCount         float64 // inputCount is the input count of this plan.
+	possibleProperties [][]*expression.Column // 可能选择的列
+	// inputCount是这个计划的输入计数
+	inputCount float64 // inputCount is the input count of this plan.
 }
 
 // IsPartialModeAgg returns if all of the AggFuncs are partialMode.

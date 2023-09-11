@@ -331,9 +331,9 @@ func isNullRejected(ctx sessionctx.Context, schema *expression.Schema, expr expr
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
 func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression) (ret []expression.Expression, retPlan LogicalPlan) {
-	canBePushed := make([]expression.Expression, 0, len(predicates))
-	canNotBePushed := make([]expression.Expression, 0, len(predicates))
-	for _, expr := range p.Exprs {
+	canBePushed := make([]expression.Expression, 0, len(predicates))    // 可以被下推的谓词
+	canNotBePushed := make([]expression.Expression, 0, len(predicates)) // 不可以被下推的谓词
+	for _, expr := range p.Exprs {                                      // 遍历表达式
 		if expression.HasAssignSetVarFunc(expr) {
 			_, child := p.baseLogicalPlan.PredicatePushDown(nil)
 			return predicates, child
@@ -349,6 +349,98 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 	}
 	remained, child := p.baseLogicalPlan.PredicatePushDown(canBePushed)
 	return append(remained, canNotBePushed...), child
+}
+
+// pushDownPredicatesForAggregation split a condition to two parts, can be pushed-down or can not be pushed-down below aggregation.
+func (la *LogicalAggregation) pushDownPredicatesForAggregation(cond expression.Expression,
+	groupByColumns *expression.Schema, exprsOriginal []expression.Expression) ([]expression.Expression, []expression.Expression) {
+	var condsToPush []expression.Expression
+	var ret []expression.Expression
+	switch cond.(type) {
+	case *expression.Constant:
+		condsToPush = append(condsToPush, cond)
+		// Consider SQL list "select sum(b) from t group by a having 1=0". "1=0" is a constant predicate which should be
+		// retained and pushed down at the same time. Because we will get a wrong query result that contains one column
+		// with value 0 rather than an empty query result.
+		ret = append(ret, cond)
+	case *expression.ScalarFunction:
+		extractedCols := expression.ExtractColumns(cond)
+		ok := true
+		for _, col := range extractedCols {
+			if !groupByColumns.Contains(col) {
+				ok = false
+				break
+			}
+		}
+
+		if ok {
+			newFunc := expression.ColumnSubstitute(cond, la.Schema(), exprsOriginal)
+			condsToPush = append(condsToPush, newFunc)
+		} else {
+			ret = append(ret, cond)
+		}
+	}
+
+	return condsToPush, ret
+}
+
+// pushDownPredicatesForAggregation split a CNF condition to two parts, can be pushed-down or can not be pushed-down below aggregation.
+// It would consider the CNF.
+// For example,
+// (a > 1 or avg(b) > 1) and (a < 3), and `avg(b) > 1` can't be pushed-down.
+// Then condsToPush: a < 3, ret: a > 1 or avg(b) > 1
+func (la *LogicalAggregation) pushDownCNFPredicatesForAggregation(cond expression.Expression,
+	groupByColumns *expression.Schema, exprsOriginal []expression.Expression) ([]expression.Expression, []expression.Expression) {
+	var condsToPush []expression.Expression
+	var ret []expression.Expression
+	subCNFItem := expression.SplitCNFItems(cond) // 合取范式拆分
+	if len(subCNFItem) == 1 {
+		return la.pushDownPredicatesForAggregation(subCNFItem[0], groupByColumns, exprsOriginal)
+	}
+
+	for _, item := range subCNFItem {
+		condsToPushForItem, retForItem := la.pushDownDNFPredicatesForAggregation(item, groupByColumns, exprsOriginal)
+		if len(condsToPushForItem) > 0 {
+			condsToPush = append(condsToPush, expression.ComposeDNFCondition(la.SCtx(), condsToPushForItem...))
+		}
+		if len(retForItem) > 0 {
+			ret = append(ret, expression.ComposeDNFCondition(la.SCtx(), retForItem...))
+		}
+	}
+
+	return condsToPush, ret
+}
+
+// pushDownDNFPredicatesForAggregation split a DNF condition to two parts, can be pushed-down or can not be pushed-down below aggregation.
+// It would consider the DNF.
+// For example,
+// (a > 1 and avg(b) > 1) or (a < 3), and `avg(b) > 1` can't be pushed-down.
+// Then condsToPush: (a < 3) and (a > 1), ret: (a > 1 and avg(b) > 1) or (a < 3)
+func (la *LogicalAggregation) pushDownDNFPredicatesForAggregation(cond expression.Expression,
+	groupByColumns *expression.Schema, exprsOriginal []expression.Expression) ([]expression.Expression, []expression.Expression) {
+	var condsToPush []expression.Expression
+	var ret []expression.Expression
+	subDNFItem := expression.SplitDNFItems(cond) // 析取范式拆分
+	if len(subDNFItem) == 1 {
+		return la.pushDownPredicatesForAggregation(subDNFItem[0], groupByColumns, exprsOriginal)
+	}
+	for _, item := range subDNFItem {
+		condsToPushForItem, retForItem := la.pushDownCNFPredicatesForAggregation(item, groupByColumns, exprsOriginal)
+		if len(condsToPushForItem) <= 0 {
+			return nil, []expression.Expression{cond}
+		}
+		condsToPush = append(condsToPush, expression.ComposeCNFCondition(la.SCtx(), condsToPushForItem...))
+		if len(retForItem) > 0 {
+			ret = append(ret, expression.ComposeCNFCondition(la.SCtx(), retForItem...))
+		}
+	}
+
+	if len(ret) == 0 {
+		return []expression.Expression{cond}, nil
+	}
+
+	dnfPushDownCond := expression.ComposeDNFCondition(la.SCtx(), condsToPush...)
+	return []expression.Expression{dnfPushDownCond}, []expression.Expression{cond}
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
@@ -379,20 +471,66 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 // 提示:
 // 1、需要以两种类型讨论谓词:expression.Constant和expression.ScalarFunction
 func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expression) (ret []expression.Expression, retPlan LogicalPlan) {
-	canBePushed := make([]expression.Expression, 0, len(predicates))
-	canNotBePushed := make([]expression.Expression, 0, len(predicates))
-	for _, expr := range la.GroupByItems {
-		if expression.HasAssignSetVarFunc(expr) {
-			_, child := la.baseLogicalPlan.PredicatePushDown(nil)
-			return predicates, child
+	var condsToPush []expression.Expression // 下推的条件
+	// 1.将聚集函数的参数append到exprsOriginal，并获取groupby的列
+	exprsOriginal := make([]expression.Expression, 0, len(la.AggFuncs)) // 存放每一个聚集函数的参数表达式
+	for _, fun := range la.AggFuncs {
+		exprsOriginal = append(exprsOriginal, fun.Args[0])
+	}
+	groupByColumns := expression.NewSchema(la.GetGroupByCols()...) // 获取groupby的列
+
+	// 2.对谓词进行遍历
+	/*
+		对于常数，比如1=0，这种应该在保留的同时下推；
+		对于ScalarFunction，它是一个返回一个值的函数，这种需要从当前谓词中提取出涉及的columns，遍历columns，如果函数中的列是groupby中需要的，就下推计算，否则保留
+	*/
+	for _, cond := range predicates {
+		/*subConsToPush, subRet := la.pushDownDNFPredicatesForAggregation(cond, groupByColumns, exprsOriginal)
+		if len(subConsToPush) > 0 {
+			condsToPush = append(condsToPush, subConsToPush...)
+		}
+		if len(subRet) > 0 {
+			ret = append(ret, subRet...)
+		}*/
+		switch cond.(type) {
+		case *expression.Constant:
+			// 对于常数，比如1=0，这种应该既保留也下推
+			condsToPush = append(condsToPush, cond)
+			// Consider SQL list "select sum(b) from t group by a having 1=0". "1=0" is a constant predicate which should be
+			// retained and pushed down at the same time. Because we will get a wrong query result that contains one column
+			// with value 0 rather than an empty query result.
+			ret = append(ret, cond)
+		case *expression.ScalarFunction:
+			// 对于ScalarFunction(标量函数LEN/UPPER/LOWER/LEFT/RIGHT/SUBSTRING/CONVERT/GETDATE)，
+			// 它是一个返回一个值的函数，这种需要从当前谓词中提取出涉及的columns，
+			// 遍历columns，如果函数中的列是groupby中需要的，就下推计算，否则保留
+			extractedCols := expression.ExtractColumns(cond) // 提取cond中的所有列
+			ok := true
+			for _, col := range extractedCols {
+				if !groupByColumns.Contains(col) { // 查看当前cond中包含的列是否存在于groupByColumns中
+					ok = false
+					break
+				}
+			}
+
+			// 如果存在的话，需要将列进行替换
+			if ok {
+				// 在聚合过程中使用聚合函数的列来替换cond的列，生成新的谓词条件，以确保谓词中的列与实际进行聚合的列保持一致
+				newFunc := expression.ColumnSubstitute(cond, la.Schema(), exprsOriginal)
+				condsToPush = append(condsToPush, newFunc)
+			} else {
+				ret = append(ret, cond)
+			}
 		}
 	}
 
-	for _, cond := range predicates {
-		new
-	}
+	// 3.调用baseLogicalPlan进行谓词下推
+	la.baseLogicalPlan.PredicatePushDown(condsToPush)
+	//if condsToPush != nil {
+	//
+	//}
 
-	return predicates, la
+	return ret, la
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.

@@ -54,6 +54,7 @@ func HasGetSetVarFunc(expr Expression) bool {
 }
 
 // HasAssignSetVarFunc checks whether an expression contains SetVar function and assign a value
+// HasAssignSetVarFunc检查表达式是否包含SetVar函数并赋值
 func HasAssignSetVarFunc(expr Expression) bool {
 	scalaFunc, ok := expr.(*ScalarFunction)
 	if !ok {

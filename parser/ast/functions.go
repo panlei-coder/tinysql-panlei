@@ -27,31 +27,31 @@ var (
 
 // List scalar function names.
 const (
-	IsNull      = "isnull"
-	Length      = "length"
-	Strcmp      = "strcmp"
-	OctetLength = "octet_length"
-	If          = "if"
-	Ifnull      = "ifnull"
-	LogicAnd    = "and"
-	LogicOr     = "or"
-	GE          = "ge"
-	LE          = "le"
-	EQ          = "eq"
-	NE          = "ne"
-	LT          = "lt"
-	GT          = "gt"
-	Plus        = "plus"
-	Minus       = "minus"
-	Div         = "div"
-	Mul         = "mul"
-	UnaryNot    = "not"
-	UnaryMinus  = "unaryminus"
-	In          = "in"
-	RowFunc     = "row"
-	SetVar      = "setvar"
-	GetVar      = "getvar"
-	Values      = "values"
+	IsNull      = "isnull"       // 是否为空值
+	Length      = "length"       // 获取字符串的长度
+	Strcmp      = "strcmp"       // 比较两个字符串的长度
+	OctetLength = "octet_length" // 获取字节长度
+	If          = "if"           // 条件语句
+	Ifnull      = "ifnull"       // 是否为空，如果为空则返回指定的值
+	LogicAnd    = "and"          // 逻辑与
+	LogicOr     = "or"           // 逻辑或
+	GE          = "ge"           // 大于等于比较
+	LE          = "le"           // 小于等于比较
+	EQ          = "eq"           // 等于比较
+	NE          = "ne"           // 不等于比较
+	LT          = "lt"           // 小于比较
+	GT          = "gt"           // 大于比较
+	Plus        = "plus"         // 加法
+	Minus       = "minus"        // 减法
+	Div         = "div"          // 除法
+	Mul         = "mul"          // 乘法
+	UnaryNot    = "not"          // 逻辑非操作
+	UnaryMinus  = "unaryminus"   // 一元负号
+	In          = "in"           // 判断某个值是否在一组值中
+	RowFunc     = "row"          // 行函数
+	SetVar      = "setvar"       // 设置变量的值
+	GetVar      = "getvar"       // 获取变量的值
+	Values      = "values"       // 一组值
 )
 
 // FuncCallExpr is for function expression.

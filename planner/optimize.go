@@ -48,11 +48,13 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 	}
 
 	// Handle the logical plan statement, use cascades planner if enabled.
-	// 对逻辑计划进行优化
+	// 判断是否可以使用cascades模型进行优化， 找到最佳的执行计划
 	if sctx.GetSessionVars().EnableCascadesPlanner {
 		finalPlan, err := cascades.DefaultOptimizer.FindBestPlan(sctx, logic)
 		return finalPlan, names, err
 	}
+
+	// 进行逻辑优化和物理优化
 	finalPlan, err := plannercore.DoOptimize(ctx, builder.GetOptFlag(), logic)
 	return finalPlan, names, err
 }

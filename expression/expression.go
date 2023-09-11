@@ -409,6 +409,7 @@ type VarAssignment struct {
 }
 
 // splitNormalFormItems split CNF(conjunctive normal form) like "a and b and c", or DNF(disjunctive normal form) like "a or b or c"
+// splitNormalFormItems拆分CNF(合取范式)，如“a and b and c”，或DNF(析取范式)，如“a or b or c”
 func splitNormalFormItems(onExpr Expression, funcName string) []Expression {
 	switch v := onExpr.(type) {
 	case *ScalarFunction:
@@ -431,6 +432,7 @@ func SplitCNFItems(onExpr Expression) []Expression {
 
 // SplitDNFItems splits DNF items.
 // DNF means disjunctive normal form, e.g. "a or b or c".
+// 析取范式的拆解
 func SplitDNFItems(onExpr Expression) []Expression {
 	return splitNormalFormItems(onExpr, ast.LogicOr)
 }

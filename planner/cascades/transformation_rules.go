@@ -493,9 +493,78 @@ func NewRulePushSelDownAggregation() Transformation {
 // OnTransform implements Transformation interface.
 // It will transform `sel->agg->x` to `agg->sel->x` or `sel->agg->sel->x`
 // or just keep the selection unchanged.
+/*
+主要实现从sel->agg->x到agg->sel->x或者sel->agg->sel->x的变换。
+当sel中的条件都存在于agg中就可以完全下推到agg之后（前者），否则就是后者。
+具体体现是判断sel中每一个condition的列是否存在于agg的groupby的列当中，
+并做下记录。存在的列可以下推到agg之下，剩余的保留在原位置。
+*/
 func (r *PushSelDownAggregation) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the algo according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	sel := old.GetExpr().ExprNode.(*plannercore.LogicalSelection)               // sel的节点
+	agg := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalAggregation) // agg的节点
+	aggSchema := old.Children[0].Prop.Schema
+
+	var pushedExprs []expression.Expression                         // 被下推的列
+	var remainedExprs []expression.Expression                       // 被保留的列
+	groupByColumns := expression.NewSchema(agg.GetGroupByCols()...) // agg函数的列
+	for _, cond := range sel.Conditions {                           // 依次遍历sel的列，如果是Constant则既保留也下推
+		switch cond.(type) {
+		case *expression.Constant:
+			// Consider SQL list "select sum(b) from t group by a having 1=0". "1=0" is a constant predicate which should be
+			// retained and pushed down at the same time. Because we will get a wrong query result that contains one column
+			// with value 0 rather than an empty query result.
+			pushedExprs = append(pushedExprs, cond)
+			remainedExprs = append(remainedExprs, cond)
+		case *expression.ScalarFunction: // 如果是ScalarFunction，则需要判断当前的列是否是包含在groupby中，如果包含的话，就下推，不包含就保留
+			extractedCols := expression.ExtractColumns(cond)
+			canPush := true
+			for _, col := range extractedCols {
+				if !groupByColumns.Contains(col) {
+					canPush = false
+					break
+				}
+			}
+			if canPush {
+				pushedExprs = append(pushedExprs, cond)
+			} else {
+				remainedExprs = append(remainedExprs, cond)
+			}
+		default:
+			remainedExprs = append(remainedExprs, cond)
+		}
+	}
+	// If no condition can be pushed, keep the selection unchanged.
+	// 如果没有需要被下推的，则不做任何改变
+	if len(pushedExprs) == 0 {
+		return nil, false, false, nil
+	}
+
+	// 如果有需要被下推的，则创建一个sel添加到agg之后
+	// 从sel->agg->x到agg->sel->x
+	sctx := sel.SCtx()
+	childGroup := old.Children[0].GetExpr().Children[0] // 获取sel的孩子节点的孩子节点，即agg的孩子节点，后续将新生成的sel（下推的）添加到agg之后
+	pushedSel := plannercore.LogicalSelection{Conditions: pushedExprs}.Init(sctx)
+	pushedGroupExpr := memo.NewGroupExpr(pushedSel)
+	// 更新新生成的sel（下推的）的孩子
+	pushedGroupExpr.SetChildren(childGroup)
+	pushedGroup := memo.NewGroupWithSchema(pushedGroupExpr, childGroup.Prop.Schema)
+	// 更新agg的孩子为新生成的sel（下推的）
+	aggGroupExpr := memo.NewGroupExpr(agg)
+	aggGroupExpr.SetChildren(pushedGroup)
+
+	// 如果没有需要保留的列，则将直接返回以agg为根的memo
+	if len(remainedExprs) == 0 {
+		return []*memo.GroupExpr{aggGroupExpr}, true, false, nil
+	}
+
+	// 如果有保留的话，则需要将保留的列重新生成sel，并将agg设置成新的sel（保留的）的孩子
+	// 从sel->agg->x到sel->agg->sel->x
+	aggGroup := memo.NewGroupWithSchema(aggGroupExpr, aggSchema)
+	remainedSel := plannercore.LogicalSelection{Conditions: remainedExprs}.Init(sctx)
+	remainedGroupExpr := memo.NewGroupExpr(remainedSel)
+	remainedGroupExpr.SetChildren(aggGroup)
+	return []*memo.GroupExpr{remainedGroupExpr}, true, false, nil
 }
 
 // TransformLimitToTopN transforms Limit+Sort to TopN.
@@ -796,7 +865,38 @@ func (r *MergeAggregationProjection) Match(old *memo.ExprIter) bool {
 
 // OnTransform implements Transformation interface.
 // It will transform `Aggregation->Projection->X` to `Aggregation->X`.
+/*
+主要是实现从agg->projection->x到agg->x的变换。也就是把映射合入agg中，只保留需要的列。
+我们只需要将agg中的groupby的列与aggregation function的参数进行映射变换即可，然后消除projection这一层group。
+*/
 func (r *MergeAggregationProjection) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the body according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	oldAgg := old.GetExpr().ExprNode.(*plannercore.LogicalAggregation)
+	proj := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalProjection)
+	projSchema := old.Children[0].GetExpr().Schema()
+
+	groupByItems := make([]expression.Expression, len(oldAgg.GroupByItems))
+	for i, item := range oldAgg.GroupByItems {
+		groupByItems[i] = expression.ColumnSubstitute(item, projSchema, proj.Exprs)
+	}
+
+	aggFuncs := make([]*aggregation.AggFuncDesc, len(oldAgg.AggFuncs))
+	for i, aggFunc := range oldAgg.AggFuncs {
+		aggFuncs[i] = aggFunc.Clone()
+		newArgs := make([]expression.Expression, len(aggFunc.Args))
+		for j, arg := range aggFunc.Args {
+			newArgs[j] = expression.ColumnSubstitute(arg, projSchema, proj.Exprs)
+		}
+		aggFuncs[i].Args = newArgs
+	}
+
+	newAgg := plannercore.LogicalAggregation{
+		GroupByItems: groupByItems,
+		AggFuncs:     aggFuncs,
+	}.Init(oldAgg.SCtx())
+
+	newAggExpr := memo.NewGroupExpr(newAgg)
+	newAggExpr.SetChildren(old.Children[0].GetExpr().Children...)
+
+	return []*memo.GroupExpr{newAggExpr}, true, false, nil
 }

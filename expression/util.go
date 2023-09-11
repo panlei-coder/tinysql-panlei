@@ -80,6 +80,7 @@ func FilterOutInPlace(input []Expression, filter func(Expression) bool) (remaine
 }
 
 // ExtractColumns extracts all columns from an expression.
+// 从一个expr中获取所有的列
 func ExtractColumns(expr Expression) []*Column {
 	// Pre-allocate a slice to reduce allocation, 8 doesn't have special meaning.
 	result := make([]*Column, 0, 8)
@@ -139,6 +140,7 @@ func extractColumnSet(expr Expression, set *intsets.Sparse) {
 }
 
 // ColumnSubstitute substitutes the columns in filter to expressions in select fields.
+// ColumnSubstitute将筛选器中的列替换为选择字段中的表达式。
 // e.g. select * from (select b as a from t) k where a < 10 => select * from (select b as a from t where b < 10) k.
 func ColumnSubstitute(expr Expression, schema *Schema, newExprs []Expression) Expression {
 	_, resExpr := ColumnSubstituteImpl(expr, schema, newExprs)

@@ -98,6 +98,11 @@ func logicalOptimize(ctx context.Context, flag uint64, logic LogicalPlan) (Logic
 		// The order of flags is same as the order of optRule in the list.
 		// We use a bitmask to record which opt rules should be used. If the i-th bit is 1, it means we should
 		// apply i-th optimizing rule.
+		/*
+			标志的顺序与列表中optRule的顺序相同。我们使用位掩码来记录应该使用哪些opt规则。
+			如果第i位是1，这意味着我们应该应用第i条优化规则。
+		*/
+		// flag作为位图进行标记，需要做哪些逻辑优化
 		if flag&(1<<uint(i)) == 0 {
 			continue
 		}
